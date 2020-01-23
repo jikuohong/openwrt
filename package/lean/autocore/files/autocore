@@ -58,8 +58,6 @@ start()
   ethtool -K eth3 tso on >/dev/null 2>&1
   ethtool -K eth3 ufo on >/dev/null 2>&1
   ethtool -K eth3 gso on >/dev/null 2>&1
-  
-  [ -f /etc/index.htm ] && mv /etc/index.htm /usr/lib/lua/luci/view/admin_status/index.htm
 }
 
 
