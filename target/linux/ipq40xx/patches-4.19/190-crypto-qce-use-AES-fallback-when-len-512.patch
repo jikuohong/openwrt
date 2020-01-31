@@ -1,0 +1,69 @@
+From 98f4673dfc77ce01137a817315c54edfea13f611 Mon Sep 17 00:00:00 2001
+From: Eneas U de Queiroz <cotequeiroz@gmail.com>
+Date: Fri, 20 Dec 2019 09:41:44 -0300
+Subject: [PATCH] crypto: qce - use AES fallback when len <= 512
+
+Process small blocks using the fallback cipher, as a workaround for an
+observed failure (DMA-related, apparently) when computing the GCM ghash
+key.  This brings a speed gain as well, since it avoids the latency of
+using the hardware engine to process small blocks.
+
+Using software for all 16-byte requests would be enough to make GCM
+work, but to increase performance, a larger threshold would be better.
+Measuring the performance of supported ciphers with openssl speed,
+software matches hardware at around 768-1024 bytes.
+
+Considering the 256-bit ciphers, software is 2-3 times faster than qce
+at 256-bytes, 30% faster at 512, and about even at 768-bytes.  With
+128-bit keys, the break-even point would be around 1024-bytes.
+
+The threshold is being set a little lower, to 512 bytes, to balance the
+cost in CPU usage.
+
+(backported to 4.19)
+Signed-off-by: Eneas U de Queiroz <cotequeiroz@gmail.com>
+
+diff --git a/drivers/crypto/qce/skcipher.c b/drivers/crypto/qce/skcipher.c
+index 188eb234ba2c..9d6f2ce4af19 100644
+--- a/drivers/crypto/qce/skcipher.c
++++ b/drivers/crypto/qce/skcipher.c
+@@ -170,15 +170,7 @@ static int qce_skcipher_setkey(struct crypto_skcipher *ablk, const u8 *key,
+ 	if (!key || !keylen)
+ 		return -EINVAL;
+ 
+-	if (IS_AES(flags)) {
+-		switch (IS_XTS(flags) ? keylen >> 1 : keylen) {
+-		case AES_KEYSIZE_128:
+-		case AES_KEYSIZE_256:
+-			break;
+-		default:
+-			goto fallback;
+-		}
+-	} else if (IS_DES(flags)) {
++	if (IS_DES(flags)) {
+ 		u32 tmp[DES_EXPKEY_WORDS];
+ 
+ 		ret = des_ekey(tmp, key);
+@@ -189,8 +181,8 @@ static int qce_skcipher_setkey(struct crypto_skcipher *ablk, const u8 *key,
+ 
+ 	ctx->enc_keylen = keylen;
+ 	memcpy(ctx->enc_key, key, keylen);
+-	return 0;
+-fallback:
++	if (!IS_AES(flags))
++		return 0;
+ 	ret = crypto_skcipher_setkey(ctx->fallback, key, keylen);
+ 	if (!ret)
+ 		ctx->enc_keylen = keylen;
+@@ -213,8 +205,9 @@ static int qce_skcipher_crypt(struct skcipher_request *req, int encrypt)
+ 	rctx->flags |= encrypt ? QCE_ENCRYPT : QCE_DECRYPT;
+ 	keylen = IS_XTS(rctx->flags) ? ctx->enc_keylen >> 1 : ctx->enc_keylen;
+ 
+-	if (IS_AES(rctx->flags) && keylen != AES_KEYSIZE_128 &&
+-	    keylen != AES_KEYSIZE_256) {
++	if (IS_AES(rctx->flags) &&
++	    ((keylen != AES_KEYSIZE_128 && keylen != AES_KEYSIZE_256)
++	     || req->cryptlen <= 512)) {
+ 		SKCIPHER_REQUEST_ON_STACK(subreq, ctx->fallback);
+ 
+ 		skcipher_request_set_tfm(subreq, ctx->fallback);
